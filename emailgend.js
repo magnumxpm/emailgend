@@ -1,10 +1,8 @@
 const dotenv = require("dotenv");
 const axios = require("axios");
-
 const jobMQ = require("./lib/job_queue");
 const { GeneratedEmail } = require("./models/email");
 const OpenAI = require("openai");
-
 const { z } = require("zod");
 const { zodResponseFormat } = require("openai/helpers/zod");
 const mongoose = require("mongoose");
@@ -32,13 +30,9 @@ mongoose.connect(MONGO_URI, {
 
 const openai = new OpenAI();
 
-// mongo controllers
 const saveGeneratedEmails = async (jobID, emails, userId, campaignId) => {
   try {
-    // get the existing
-    const existingDoc = await GeneratedEmail.findOne({
-      jobId: jobID,
-    });
+    const existingDoc = await GeneratedEmail.findOne({ jobId: jobID });
     if (!existingDoc) {
       return false;
     }
@@ -53,7 +47,6 @@ const saveGeneratedEmails = async (jobID, emails, userId, campaignId) => {
     };
     existingDoc.isDone = true;
 
-    // save it
     await existingDoc.save();
     return true;
   } catch (err) {
@@ -65,124 +58,84 @@ const saveGeneratedEmails = async (jobID, emails, userId, campaignId) => {
   }
 };
 
-// ---------------------------- AI Handlers ----------------------------
+// Schema for the summaries returned by GPT
+const SummarySchema = z.object({
+  websiteSummary: z.string(),
+  linkedinSummary: z.string(),
+});
 
-const fetchLinkedinAndWebsiteSummariesOfPeople = async (people) => {
-  return await Promise.all(
-    people.map(async (person) => {
-      const { id, website, linkedin_url } = person;
+const EmailGenerationReasoning = z.object({
+  email_subject: z.string(),
+  primary_email: z.string(),
+  first_follow_up_email: z.string(),
+  second_follow_up_email: z.string(),
+});
 
-      // Variables to hold scraped content
-      let websiteContent = "";
-      let linkedinData = "";
+// Function to generate the three emails for a given person
+const processPersonEmails = async (
+  person,
+  user,
+  ProductName,
+  painPoints,
+  valueProposition,
+  callToAction,
+  emailSignature,
+  userSummary,
+  orgSummary,
+  personName,
+  userName,
+  personTitle,
+  userDescription,
+  motivationOfOutreach,
+  emailTone,
+  extraInformation,
+  successStories,
+) => {
+  console.log("Processing person:", person.name);
 
-      // Array to hold scraping promises
-      const scrapeTasks = [];
+  const promptBody = `You are an expert at writing professional cold emails that actually receive replies. My company/product name is ${ProductName} and we\'re solving the following pain points: ${painPoints}. Our value proposition is ${valueProposition}. The call-to-action of the email has to be: ${callToAction}. Add the following email signature at the bottom of the email: ${emailSignature}.
+The name of the recipient of this email is ${personName || person.name}. The recipient currently works at ${userName || user.name} at a post of ${personTitle || person.title}. The description of the company the recipient works at is as follows: ${userDescription || user.description}. The summary of the recipient’s company is ${person.receiverOrgWebsiteSummary}. The summary of the recipient’s LinkedIn is ${person.receiverLinkedInSummary}. The sender’s company\'s website summary is as follows: ${orgSummary}. The sender’s linkedin profile\'s summary is as follows: ${userSummary}. Some extra information provided by the sender: ${extraInformation}. Some success stories of the sender’s company: ${successStories}. Motivation of outreach for the sender: ${motivationOfOutreach}. The tone of the email should be ${emailTone}. Write 3 cold emails(subject + text content + email signature), each of them under 200 words. The first email will be the original email that we’ll send. The second email that you write should be the first follow-up to the original email and the third email that you write should be the second(and the last) follow-up. Write out the email_subject (same for all three), primary_email, first_follow_up_email, second_follow_up_email accordingly. Do not include the subject in primary_email, first_follow_up_email, and second_follow_up_email.`;
 
-      // Scrape website content if URL is provided
-      if (website) {
-        const websiteContentPromise = axios
-          .post(
-            "https://ai-content-scraper.p.rapidapi.com/scrape",
-            { url: website },
-            {
-              headers: {
-                "Content-Type": "application/json",
-                "x-rapidapi-host": "ai-content-scraper.p.rapidapi.com",
-                "x-rapidapi-key": RAPID_API_KEY,
-              },
-            },
-          )
-          .then((response) => {
-            return response.data.content;
-          })
-          .catch((error) => {
-            console.error(
-              `Error scraping website for id ${id}:`,
-              error.message,
-            );
-            return null;
-          });
+  const completion = await openai.beta.chat.completions.parse({
+    model: MODEL,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are an expert at generating cold emails based on user input that actually work and are capable of getting a response.",
+      },
+      { role: "user", content: promptBody },
+    ],
+    response_format: zodResponseFormat(
+      EmailGenerationReasoning,
+      "email_generation_reasoning",
+    ),
+  });
 
-        scrapeTasks.push(
-          websiteContentPromise.then((content) => {
-            websiteContent = content;
-          }),
-        );
-      }
+  const email_generation_reasoning = completion.choices[0].message.parsed;
+  const personEmails = [
+    {
+      emailNumber: 1,
+      emailContent: email_generation_reasoning.primary_email,
+      emailSubject: email_generation_reasoning.email_subject,
+    },
+    {
+      emailNumber: 2,
+      emailContent: email_generation_reasoning.first_follow_up_email,
+      emailSubject: email_generation_reasoning.email_subject,
+    },
+    {
+      emailNumber: 3,
+      emailContent: email_generation_reasoning.second_follow_up_email,
+      emailSubject: email_generation_reasoning.email_subject,
+    },
+  ];
 
-      // Scrape LinkedIn profile data if URL is provided
-      if (linkedin_url) {
-        const linkedinDataPromise = axios
-          .get(
-            `https://linkedin-data-api.p.rapidapi.com/get-profile-data-by-url?url=${linkedin_url}`,
-            {
-              headers: {
-                "x-rapidapi-host": "linkedin-data-api.p.rapidapi.com",
-                "x-rapidapi-key": RAPID_API_KEY,
-              },
-            },
-          )
-          .then((response) => {
-            return response.data.response;
-          })
-          .catch((error) => {
-            console.error(
-              `Error scraping LinkedIn profile for id ${id}:`,
-              error.message,
-            );
-            return null;
-          });
-
-        scrapeTasks.push(
-          linkedinDataPromise.then((data) => {
-            linkedinData = data;
-          }),
-        );
-      }
-
-      // Wait for all scraping tasks to complete
-      await Promise.all(scrapeTasks);
-
-      // Define the schema for OpenAI's structured output
-      const SummarySchema = z.object({
-        websiteSummary: z.string(),
-        linkedinSummary: z.string(),
-      });
-
-      // Prepare the prompt for OpenAI
-      const messages = [
-        {
-          role: "system",
-          content: `You are an assistant that summarizes website content and LinkedIn profiles. You will get a website content and a linkedin profile data. Your task will be to summarize them effectively, by talking about the subject (person) based on the information. You should answer with a 'websiteSummary' and a 'linkedinSummary'`,
-        },
-        {
-          role: "user",
-          content: `${websiteContent ? `Website Content:\n${websiteContent}\n` : ""}${
-            linkedinData
-              ? `LinkedIn Profile Data:\n${JSON.stringify(linkedinData)}\n`
-              : ""
-          }`,
-        },
-      ];
-
-      // Use OpenAI to get the summaries
-      const completion = await openai.beta.chat.completions.parse({
-        model: "gpt-4o",
-        messages,
-        response_format: zodResponseFormat(SummarySchema, "summary_schema"),
-      });
-
-      const summary_schema = completion.choices[0].message.parsed;
-      console.log("Summary generated for id:", id);
-
-      return {
-        id,
-        websiteSummary: summary_schema.websiteSummary,
-        linkedinSummary: summary_schema.linkedinSummary,
-      };
-    }),
-  );
+  console.log("MODEL: ", MODEL, "personEmails: ", personEmails);
+  return {
+    ...person,
+    emails: personEmails,
+  };
 };
 
 const generateEmails = async (requestData) => {
@@ -208,123 +161,139 @@ const generateEmails = async (requestData) => {
       successStories,
     } = requestData;
 
-    // Initialize emails array to store all company entries
     const emails = [];
 
-    const processPersonEmails = async (person, user) => {
-      console.log("Processing person:", person.name);
-
-      const EmailGenerationReasoning = z.object({
-        email_subject: z.string(),
-        primary_email: z.string(),
-        first_follow_up_email: z.string(),
-        second_follow_up_email: z.string(),
-      });
-
-      // recipient company description -> userDescription || user.description
-      // recipient's company summary -> personOrgWebsiteSummary
-      // recipient's company website summary -> personOrgWebsiteSummary
-      //
-
-      const promptBody = `You are an expert at writing professional cold emails that actually receive replies. My company/product name is ${ProductName} and we\'re solving the following pain points: ${painPoints}. Our value proposition is ${valueProposition}. The call-to-action of the email has to be: ${callToAction}. Add the following email signature at the bottom of the email: ${emailSignature}.\n The name of the recipient of this email is ${personName || person.name}. The recipient currently works at ${userName || user.name} at a post of ${personTitle || person.title}. The description of the company the recipient works at is as follows: ${userDescription || user.description}. The summary of the recipient’s company is ${person.receiverOrgWebsiteSummary}. The summary of the recipient’s LinkedIn is ${person.receiverLinkedInSummary}. The sender\’s company\'s website summary is as follows: ${orgSummary}. The sender\’s linkedin profile\'s summary is as follows: ${userSummary}. Some extra information provided by the sender: ${extraInformation}. Some success stories of the sender’s company: ${successStories}. Motivation of outreach for the sender: ${motivationOfOutreach}. The tone of the email should be ${emailTone}. Write 3 cold email(subject + text content + email signature), each of them under 200 words. The first email will be the original email that we’ll send. The second email that you write should be the first follow-up to the original email and the third email that you write should be the second(and the last) follow-up to the original, and the first follow-up emails. Write out the email_subject (same for all three), primary_email, first_follow_up_email, second_follow_up_email accordingly. Do not include the subject in primary_email, first_follow_up_email, and second_follow_up_email.`;
-
-      const completion = await openai.beta.chat.completions.parse({
-        model: MODEL,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an expert at generating cold emails based on user input that actually work and are capable of getting a response from the other end.",
-          },
-          { role: "user", content: promptBody },
-        ],
-        response_format: zodResponseFormat(
-          EmailGenerationReasoning,
-          "email_generation_reasoning",
-        ),
-      });
-
-      // TODO: Should the AI fail to generate content, there should be an error parameter to
-      // pass on the error message to the frontend.
-
-      // if (!completion.choices[0].message.success) {
-      // 	console.error(
-      // 		'Failed to parse generated emails:',
-      // 		parsedEmails.error
-      // 	);
-      // 	throw new Error('Invalid email format generated by AI');
-      // }
-
-      const email_generation_reasoning = completion.choices[0].message.parsed;
-
-      const personEmails = [];
-      personEmails.push({
-        emailNumber: 1,
-        emailContent: email_generation_reasoning.primary_email,
-        emailSubject: email_generation_reasoning.email_subject,
-      });
-      personEmails.push({
-        emailNumber: 2,
-        emailContent: email_generation_reasoning.first_follow_up_email,
-        emailSubject: email_generation_reasoning.email_subject,
-      });
-      personEmails.push({
-        emailNumber: 3,
-        emailContent: email_generation_reasoning.second_follow_up_email,
-        emailSubject: email_generation_reasoning.email_subject,
-      });
-
-      console.log("MODEL: ", MODEL, "personEmails: ", personEmails);
-
-      return {
-        ...person,
-        emails: personEmails,
-      };
-    };
-
-    // Process all companies and their people
+    // Process each company
     for (const user of emailData) {
       console.log(
         "[emailgend] (generateEmails) Processing company:",
         user.name,
       );
 
-      // aggregate all the person URLs
-      const personURLs = user.people.map((person) => {
-        return {
-          id: person.id,
-          website: person.receiverOrgWebsiteURL,
-          linkedin_url: person.receiverLinkedInURL,
-        };
-      });
+      // Process each person in parallel
+      const processedPeople = await Promise.all(
+        user.people.map(async (person) => {
+          // Step 1: Fetch website & LinkedIn data in parallel
+          const {
+            id,
+            receiverOrgWebsiteURL: website,
+            receiverLinkedInURL: linkedin_url,
+          } = person;
 
-      const summaries =
-        await fetchLinkedinAndWebsiteSummariesOfPeople(personURLs);
+          let websiteContent = "";
+          let linkedinData = null;
 
-      // convert summaries to a Map() to avoid failures
-      const SummaryMap = new Map();
-      for (const ps of summaries) {
-        SummaryMap.set(ps.id, ps);
-      }
+          const scrapeTasks = [];
 
-      // Process all people in the company
-      const peoplePromises = user.people.map(async (person) => {
-        // Iteratively add the corresponding summary inside the person object
+          // Website scraping if available
+          if (website) {
+            const websitePromise = axios
+              .post(
+                "https://ai-content-scraper.p.rapidapi.com/scrape",
+                { url: website },
+                {
+                  headers: {
+                    "Content-Type": "application/json",
+                    "x-rapidapi-host": "ai-content-scraper.p.rapidapi.com",
+                    "x-rapidapi-key": RAPID_API_KEY,
+                  },
+                },
+              )
+              .then((resp) => resp.data.content)
+              .catch((error) => {
+                console.error(
+                  `Error scraping website for id ${id}:`,
+                  error.message,
+                );
+                return "";
+              });
+            scrapeTasks.push(
+              websitePromise.then((content) => {
+                websiteContent = content;
+              }),
+            );
+          }
 
-        const summary = SummaryMap.get(person.id);
-        person.receiverLinkedInSummary = summary ? summary.linkedinSummary : "";
-        person.receiverOrgWebsiteSummary = summary
-          ? summary.websiteSummary
-          : "";
+          // LinkedIn scraping if available
+          if (linkedin_url) {
+            const linkedinPromise = axios
+              .get(
+                `https://linkedin-data-api.p.rapidapi.com/get-profile-data-by-url?url=${linkedin_url}`,
+                {
+                  headers: {
+                    "x-rapidapi-host": "linkedin-data-api.p.rapidapi.com",
+                    "x-rapidapi-key": RAPID_API_KEY,
+                  },
+                },
+              )
+              .then((resp) => resp.data.response)
+              .catch((error) => {
+                console.error(
+                  `Error scraping LinkedIn profile for id ${id}:`,
+                  error.message,
+                );
+                return null;
+              });
+            scrapeTasks.push(
+              linkedinPromise.then((data) => {
+                linkedinData = data;
+              }),
+            );
+          }
 
-        // pass the populated person to process the emails
-        const processedPerson = await processPersonEmails(person, user);
-        return processedPerson;
-      });
+          await Promise.all(scrapeTasks);
 
-      const processedPeople = await Promise.all(peoplePromises);
+          // Step 2: Use GPT to summarize website and LinkedIn data
+          const messages = [
+            {
+              role: "system",
+              content: `You are an assistant that summarizes website content and LinkedIn profiles. You will get a website content and a linkedin profile data. Your task is to summarize them effectively. You should answer with 'websiteSummary' and 'linkedinSummary'.`,
+            },
+            {
+              role: "user",
+              content: `${websiteContent ? `Website Content:\n${websiteContent}\n` : ""}${
+                linkedinData
+                  ? `LinkedIn Profile Data:\n${JSON.stringify(linkedinData)}\n`
+                  : ""
+              }`,
+            },
+          ];
 
-      // Add the company with processed people to emails array
+          const completion = await openai.beta.chat.completions.parse({
+            model: "gpt-4o",
+            messages,
+            response_format: zodResponseFormat(SummarySchema, "summary_schema"),
+          });
+
+          const summary_schema = completion.choices[0].message.parsed;
+          person.receiverLinkedInSummary = summary_schema.linkedinSummary;
+          person.receiverOrgWebsiteSummary = summary_schema.websiteSummary;
+
+          // Step 3: Once we have the summaries, generate the emails for this person
+          const processedPerson = await processPersonEmails(
+            person,
+            user,
+            ProductName,
+            painPoints,
+            valueProposition,
+            callToAction,
+            emailSignature,
+            userSummary,
+            orgSummary,
+            personName,
+            userName,
+            personTitle,
+            userDescription,
+            motivationOfOutreach,
+            emailTone,
+            extraInformation,
+            successStories,
+          );
+
+          return processedPerson;
+        }),
+      );
+
       emails.push({
         company_id: user.company_Id || user.company_id,
         company_logo_url: user.company_logo_url || "",
@@ -337,22 +306,19 @@ const generateEmails = async (requestData) => {
     return emails;
   } catch (err) {
     console.error(
-      "[emailgend] (saveGeneratedEmails) Error while generating emails: ",
+      "[emailgend] (generateEmails) Error while generating emails: ",
       err,
     );
     throw err;
   }
 };
 
-// ---------------------------- MQ Listener ----------------------------
-
 const listen = async () => {
   await jobMQ.ensure_queue("email_generation");
-
   console.warn(
     "emailgend will start listening for new jobs in queue<email_generation>",
   );
-  console.info("Listening for incomming messages...");
+  console.info("Listening for incoming messages...");
 
   await jobMQ.subscribe("email_generation", async (msg) => {
     let data;
@@ -365,10 +331,7 @@ const listen = async () => {
     }
 
     try {
-      // generate all the emails, without pagination
       const allEmails = await generateEmails(data.message);
-
-      // save all the emails
       await saveGeneratedEmails(
         data.jobID,
         allEmails,
@@ -395,5 +358,5 @@ jobMQ
   })
   .catch((err) => {
     console.error("Failed to establish AMQP connection:", err);
-    process.exit(1); // Exit the process if connection fails
+    process.exit(1);
   });
